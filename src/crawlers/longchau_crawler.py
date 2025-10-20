@@ -31,6 +31,7 @@ class LongChauCrawler:
         self.logger = setup_logging()
         self.products = []
         self.driver = None
+        self.current_categories = []  # Lưu trữ danh sách categories đã crawl
     
     def __del__(self):
         """Destructor để đảm bảo Selenium driver được đóng"""
@@ -719,6 +720,10 @@ class LongChauCrawler:
         """Crawl toàn bộ sản phẩm trong một danh mục"""
         self.logger.info(f"Bắt đầu crawl danh mục: {category_url}")
         
+        # Lưu thông tin category để dùng cho tên file
+        if category_url not in self.current_categories:
+            self.current_categories.append(category_url)
+        
         # Lấy danh sách URL sản phẩm
         product_urls = self.get_product_urls(category_url)
         
@@ -769,15 +774,54 @@ class LongChauCrawler:
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
+        # Tạo tên file dựa trên categories đã crawl
+        category_name = self._generate_filename_from_categories()
+        
         if format_type in ['json', 'both']:
-            json_file = f"data/longchau_products_{timestamp}.json"
+            json_file = f"data/longchau_products_{category_name}_{timestamp}.json"
             save_to_json(self.products, json_file)
             self.logger.info(f"Đã lưu {len(self.products)} sản phẩm vào {json_file}")
         
         if format_type in ['csv', 'both']:
-            csv_file = f"data/longchau_products_{timestamp}.csv"
+            csv_file = f"data/longchau_products_{category_name}_{timestamp}.csv"
             save_to_csv(self.products, csv_file)
             self.logger.info(f"Đã lưu {len(self.products)} sản phẩm vào {csv_file}")
+    
+    def _generate_filename_from_categories(self) -> str:
+        """Tạo tên file từ danh sách categories đã crawl"""
+        if not self.current_categories:
+            return "unknown"
+        
+        # Nếu chỉ có 1 category, dùng trực tiếp
+        if len(self.current_categories) == 1:
+            category = self.current_categories[0]
+            # Thay thế ký tự đặc biệt để tạo tên file hợp lệ
+            return category.replace('/', '_').replace('-', '_')
+        
+        # Nếu có nhiều categories, tìm common prefix hoặc tạo tên ngắn gọn
+        categories = self.current_categories
+        
+        # Tìm common prefix (main category chung)
+        if all('/' in cat for cat in categories):
+            main_cats = [cat.split('/')[0] for cat in categories]
+            if len(set(main_cats)) == 1:
+                # Tất cả cùng main category
+                main_cat = main_cats[0]
+                sub_cats = [cat.split('/')[-1] for cat in categories]
+                if len(sub_cats) <= 3:
+                    # Nếu ít subcategories, liệt kê hết
+                    return f"{main_cat}_{'_'.join(sub_cats)}".replace('-', '_')
+                else:
+                    # Nếu nhiều subcategories, dùng tên chung
+                    return f"{main_cat}_multiple".replace('-', '_')
+        
+        # Fallback: dùng số lượng categories
+        return f"multiple_{len(categories)}_categories"
+    
+    def reset_categories(self):
+        """Reset danh sách categories để bắt đầu crawl mới"""
+        self.current_categories = []
+        self.products = []
 
 if __name__ == "__main__":
     crawler = LongChauCrawler()

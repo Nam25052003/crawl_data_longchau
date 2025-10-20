@@ -59,6 +59,8 @@ def main():
     crawler = LongChauCrawler()
     
     try:
+        # Reset categories trước khi bắt đầu crawl mới
+        crawler.reset_categories()
         if args.mode == 'single':
             if not args.category_url:
                 print("❌ Cần cung cấp --category-url cho chế độ single")
