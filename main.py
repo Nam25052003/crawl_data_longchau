@@ -10,21 +10,37 @@ import os
 sys.path.append(os.path.dirname(__file__))
 
 from src.crawlers.longchau_crawler import LongChauCrawler
-from config.settings import CATEGORIES
+from config.settings import *
 
 def main():
     parser = argparse.ArgumentParser(description='Crawler cho website Long Châu')
-    parser.add_argument('--category', '-c', 
-                       choices=CATEGORIES + ['all'], 
-                       default='all',
-                       help='Danh mục cần crawl (mặc định: all)')
-    parser.add_argument('--max-pages', '-p', 
-                       type=int, 
-                       default=5,
-                       help='Số trang tối đa mỗi danh mục (mặc định: 5)')
+    
+    # Các tùy chọn crawl
+    parser.add_argument('--category-url', '-u', 
+                       type=str,
+                       help='URL danh mục cụ thể (VD: thuc-pham-chuc-nang/canxi-vitamin-D)')
+    parser.add_argument('--mode', '-m',
+                       choices=['single', 'vitamin', 'subcategory', 'all'],
+                       default='single',
+                       help='Chế độ crawl (mặc định: single)')
+    parser.add_argument('--main-category', 
+                       type=str,
+                       help='Danh mục chính (VD: thuc-pham-chuc-nang)')
+    parser.add_argument('--subcategories',
+                       type=str, 
+                       nargs='+',
+                       help='Danh sách subcategories')
+    
+    # Các tùy chọn giới hạn
     parser.add_argument('--max-products', '-n', 
                        type=int, 
-                       help='Số sản phẩm tối đa mỗi danh mục')
+                       default=10,
+                       help='Số sản phẩm tối đa mỗi danh mục (mặc định: 10)')
+    parser.add_argument('--max-products-per-category', 
+                       type=int,
+                       help='Số sản phẩm tối đa mỗi subcategory')
+    
+    # Các tùy chọn output
     parser.add_argument('--output-format', '-f', 
                        choices=['json', 'csv', 'both'], 
                        default='both',
@@ -43,19 +59,35 @@ def main():
     crawler = LongChauCrawler()
     
     try:
-        if args.category == 'all':
-            print("🚀 Bắt đầu crawl tất cả danh mục...")
-            crawler.crawl_all_categories(
-                max_pages_per_category=args.max_pages,
-                max_products_per_category=args.max_products
+        if args.mode == 'single':
+            if not args.category_url:
+                print("❌ Cần cung cấp --category-url cho chế độ single")
+                print("VD: python main.py --mode single --category-url thuc-pham-chuc-nang/canxi-vitamin-D")
+                return
+            
+            print(f"🚀 Crawl danh mục: {args.category_url}")
+            crawler.crawl_category(args.category_url, max_products=args.max_products)
+            
+        elif args.mode == 'vitamin':
+            print("🚀 Crawl tất cả danh mục vitamin và khoáng chất...")
+            crawler.crawl_vitamin_categories(max_products_per_category=args.max_products_per_category or args.max_products)
+            
+        elif args.mode == 'subcategory':
+            if not args.main_category or not args.subcategories:
+                print("❌ Cần cung cấp --main-category và --subcategories cho chế độ subcategory")
+                print("VD: python main.py --mode subcategory --main-category thuc-pham-chuc-nang --subcategories canxi-vitamin-D vitamin-tong-hop")
+                return
+            
+            print(f"🚀 Crawl subcategories của {args.main_category}...")
+            crawler.crawl_subcategories(
+                args.main_category, 
+                args.subcategories,
+                max_products_per_category=args.max_products_per_category or args.max_products
             )
-        else:
-            print(f"🚀 Bắt đầu crawl danh mục: {args.category}")
-            crawler.crawl_category(
-                args.category,
-                max_pages=args.max_pages,
-                max_products=args.max_products
-            )
+            
+        elif args.mode == 'all':
+            print("🚀 Crawl tất cả danh mục (chưa implement - sử dụng mode khác)")
+            return
         
         # Lưu dữ liệu
         crawler.save_data(args.output_format)

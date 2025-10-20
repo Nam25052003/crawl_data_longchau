@@ -12,6 +12,14 @@ import time
 from tqdm import tqdm
 import logging
 from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
 
 from config.settings import *
 from src.utils.helpers import *
@@ -22,43 +30,159 @@ class LongChauCrawler:
         self.session.headers.update(DEFAULT_HEADERS)
         self.logger = setup_logging()
         self.products = []
+        self.driver = None
+    
+    def __del__(self):
+        """Destructor để đảm bảo Selenium driver được đóng"""
+        self.close_selenium_driver()
+    
+    def init_selenium_driver(self):
+        """Khởi tạo Selenium WebDriver"""
+        if self.driver is None:
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')  # Chạy ẩn browser
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument(f'--user-agent={USER_AGENT}')
+            
+            try:
+                # Sử dụng webdriver-manager để tự động tải ChromeDriver
+                service = Service(ChromeDriverManager().install())
+                self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                self.driver.implicitly_wait(10)
+                self.logger.info("Đã khởi tạo Selenium WebDriver")
+            except Exception as e:
+                self.logger.error(f"Lỗi khởi tạo WebDriver: {str(e)}")
+                raise
+    
+    def close_selenium_driver(self):
+        """Đóng Selenium WebDriver"""
+        if self.driver:
+            self.driver.quit()
+            self.driver = None
+            self.logger.info("Đã đóng Selenium WebDriver")
         
     def get_product_urls(self, category_url: str) -> List[str]:
-        """Lấy danh sách URL sản phẩm từ một danh mục"""
+        """Lấy danh sách URL sản phẩm từ một danh mục với xử lý nút 'Xem thêm'"""
         product_urls = []
         
         try:
             url = f"{BASE_URL}/{category_url}"
             self.logger.info(f"Crawling category page: {url}")
             
-            response = make_request(url, self.session.headers)
-            soup = BeautifulSoup(response.content, 'html.parser')
+            # Khởi tạo Selenium driver
+            self.init_selenium_driver()
+            self.driver.get(url)
             
-            # Tìm các link sản phẩm - Long Châu có thể có nhiều pattern khác nhau
-            product_links = soup.find_all('a', href=True)
+            # Đợi trang load
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
             
-            for link in product_links:
-                href = link.get('href')
-                if href:
-                    # Kiểm tra các pattern URL sản phẩm của Long Châu
-                    if ('.html' in href and 
-                        any(keyword in href for keyword in ['/thuoc/', '/thuc-pham-chuc-nang/', '/duoc-my-pham/', '/cham-soc-ca-nhan/', '/trang-thiet-bi-y-te/']) and
+            # Click vào nút "Xem thêm" cho đến khi không còn nút nào
+            max_clicks = 20  # Giới hạn số lần click để tránh vòng lặp vô tận
+            click_count = 0
+            
+            while click_count < max_clicks:
+                try:
+                    # Tìm nút "Xem thêm"
+                    see_more_button = WebDriverWait(self.driver, 3).until(
+                        EC.element_to_be_clickable((By.XPATH, "//button[contains(.//span, 'Xem thêm') and contains(.//span, 'sản phẩm')]"))
+                    )
+                    
+                    # Scroll đến nút
+                    self.driver.execute_script("arguments[0].scrollIntoView(true);", see_more_button)
+                    time.sleep(1)
+                    
+                    # Click vào nút
+                    see_more_button.click()
+                    click_count += 1
+                    
+                    self.logger.info(f"Đã click 'Xem thêm' lần {click_count}")
+                    
+                    # Đợi content load
+                    time.sleep(2)
+                    
+                except TimeoutException:
+                    # Không còn nút "Xem thêm"
+                    self.logger.info("Không còn nút 'Xem thêm', đã load tất cả sản phẩm")
+                    break
+                except Exception as e:
+                    self.logger.warning(f"Lỗi khi click 'Xem thêm': {str(e)}")
+                    break
+            
+            # Lấy HTML sau khi đã load tất cả sản phẩm
+            page_source = self.driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+            
+            # Tìm grid sản phẩm chính - grid có class 'grid-cols-2' và 'md:grid-cols-4'
+            product_grid = None
+            all_grids = soup.find_all('div', class_=True)
+            
+            for div in all_grids:
+                classes = div.get('class', [])
+                if (isinstance(classes, list) and 
+                    'grid' in classes and 
+                    'grid-cols-2' in classes and 
+                    'md:grid-cols-4' in classes):
+                    product_grid = div
+                    break
+            
+            if product_grid:
+                # Lấy tất cả product links từ grid chính
+                all_links_in_grid = product_grid.find_all('a', href=lambda x: x and '.html' in x)
+                
+                # Lọc chỉ lấy links trong category hiện tại
+                category_path = f"/{category_url.split('/')[0]}/"  # Ví dụ: /thuc-pham-chuc-nang/
+                
+                seen_urls = set()
+                for link in all_links_in_grid:
+                    href = link.get('href')
+                    if (href and 
+                        category_path in href and 
                         href.count('/') >= 2):  # Đảm bảo là URL sản phẩm chi tiết
                         
                         if href.startswith('/'):
                             href = BASE_URL + href
-                        product_urls.append(href)
-            
-            random_delay(*RANDOM_DELAY_RANGE)
+                        
+                        # Chỉ thêm nếu chưa thấy URL này
+                        if href not in seen_urls:
+                            seen_urls.add(href)
+                            product_urls.append(href)
+                
+                self.logger.info(f"Tìm thấy grid sản phẩm chính với {len(product_urls)} sản phẩm unique")
+            else:
+                # Fallback: lấy tất cả unique links trong category
+                self.logger.warning("Không tìm thấy grid sản phẩm chính, sử dụng fallback")
+                
+                category_path = f"/{category_url.split('/')[0]}/"
+                all_links = soup.find_all('a', href=lambda x: x and '.html' in x and category_path in x)
+                
+                seen_urls = set()
+                for link in all_links:
+                    href = link.get('href')
+                    if href and href.count('/') >= 2:
+                        if href.startswith('/'):
+                            href = BASE_URL + href
+                        
+                        if href not in seen_urls:
+                            seen_urls.add(href)
+                            product_urls.append(href)
+                
+                self.logger.info(f"Fallback: tìm thấy {len(product_urls)} sản phẩm unique")
             
         except Exception as e:
             self.logger.error(f"Lỗi khi crawl danh mục {category_url}: {str(e)}")
+        finally:
+            # Đóng Selenium driver
+            self.close_selenium_driver()
         
-        # Loại bỏ duplicate và filter chỉ lấy URL sản phẩm thực sự
-        unique_urls = list(set(product_urls))
-        filtered_urls = [url for url in unique_urls if self.is_product_url(url)]
+        # Filter chỉ lấy URL sản phẩm thực sự (đã loại bỏ duplicate ở trên)
+        filtered_urls = [url for url in product_urls if self.is_product_url(url)]
         
-        self.logger.info(f"Tìm thấy {len(filtered_urls)} sản phẩm trong danh mục {category_url}")
+        self.logger.info(f"Tìm thấy {len(filtered_urls)} sản phẩm trong danh mục {category_url} (sau khi load tất cả)")
         return filtered_urls
     
     def is_product_url(self, url: str) -> bool:
@@ -197,6 +321,49 @@ class LongChauCrawler:
     
     def extract_brand(self, soup: BeautifulSoup) -> str:
         """Trích xuất thương hiệu"""
+        import json
+        import re
+        
+        # Tìm trong JSON scripts trước (nguồn chính xác nhất)
+        scripts = soup.find_all('script', type='application/json')
+        for script in scripts:
+            try:
+                script_content = script.string
+                if script_content:
+                    # Thử parse JSON
+                    try:
+                        data = json.loads(script_content)
+                        brand_info = self._find_brand_in_json(data)
+                        if brand_info:
+                            return clean_text(brand_info)
+                    except:
+                        # Nếu không parse được JSON, tìm bằng regex
+                        brand_matches = re.findall(r'"brand[^"]*":\s*"([^"]+)"', script_content, re.IGNORECASE)
+                        if brand_matches:
+                            return clean_text(brand_matches[0])
+                        
+                        manufacturer_matches = re.findall(r'"manufacturer[^"]*":\s*"([^"]+)"', script_content, re.IGNORECASE)
+                        if manufacturer_matches:
+                            return clean_text(manufacturer_matches[0])
+            except:
+                continue
+        
+        # Tìm trong structured data (JSON-LD)
+        json_ld_scripts = soup.find_all('script', type='application/ld+json')
+        for script in json_ld_scripts:
+            try:
+                data = json.loads(script.string)
+                brand_info = self._find_brand_in_json(data)
+                if brand_info:
+                    return clean_text(brand_info)
+            except:
+                continue
+        
+        # Tìm trong table info (sử dụng extract_table_info)
+        brand_from_table = self.extract_table_info(soup, "Thương hiệu")
+        if brand_from_table:
+            return brand_from_table
+        
         # Tìm trong thông tin sản phẩm theo cấu trúc Long Châu
         brand_div = soup.find('div', string=lambda text: text and 'Thương hiệu:' in text)
         if brand_div:
@@ -212,6 +379,29 @@ class LongChauCrawler:
             if element:
                 return clean_text(element.get_text())
         return ""
+    
+    def _find_brand_in_json(self, data, path=""):
+        """Tìm brand trong JSON structure"""
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if 'brand' in key.lower() or 'manufacturer' in key.lower():
+                    if isinstance(value, str):
+                        return value
+                    elif isinstance(value, dict) and 'name' in value:
+                        return value['name']
+                
+                # Đệ quy tìm trong nested objects
+                result = self._find_brand_in_json(value, f"{path}.{key}")
+                if result:
+                    return result
+        
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                result = self._find_brand_in_json(item, f"{path}[{i}]")
+                if result:
+                    return result
+        
+        return None
     
     def extract_category(self, soup: BeautifulSoup) -> str:
         """Trích xuất danh mục"""
@@ -232,18 +422,141 @@ class LongChauCrawler:
         return ""
     
     def extract_images(self, soup: BeautifulSoup) -> List[str]:
-        """Trích xuất danh sách ảnh"""
+        """Trích xuất danh sách ảnh sản phẩm từ gallery carousel"""
         images = []
-        selectors = ['img', '.product-images img', '.gallery img', '.image img']
-        for selector in selectors:
-            elements = soup.select(selector)
-            for img in elements:
+        
+        # 1. Trích xuất từ carousel gallery chính
+        carousel_gallery = soup.find('div', class_='carousel-gallery-list')
+        if carousel_gallery:
+            # Lấy tất cả ảnh trong carousel
+            gallery_imgs = carousel_gallery.find_all('img', class_='gallery-img')
+            for img in gallery_imgs:
+                src = img.get('src')
+                srcset = img.get('srcset')
+                
+                # Ưu tiên lấy URL chất lượng cao từ srcset
+                if srcset:
+                    # Lấy URL 2x (chất lượng cao) từ srcset
+                    srcset_parts = srcset.split(',')
+                    for part in srcset_parts:
+                        if '2x' in part:
+                            src = part.split(' ')[0].strip()
+                            break
+                    else:
+                        # Nếu không có 2x, lấy URL đầu tiên
+                        src = srcset_parts[0].split(' ')[0].strip()
+                
+                if src and self.is_product_image(src):
+                    # Chuyển đổi sang full size nếu cần
+                    full_size_src = self.convert_to_full_size_image(src)
+                    images.append(full_size_src)
+        
+        # 2. Trích xuất từ modal gallery (nếu có)
+        # Tìm các ảnh trong modal lightbox gallery
+        modal_thumbs = soup.find_all('div', class_='lg-thumb-item')
+        for thumb in modal_thumbs:
+            img = thumb.find('img')
+            if img:
+                src = img.get('src')
+                if src and self.is_product_image(src):
+                    # Chuyển đổi từ thumbnail sang full size
+                    full_size_src = self.convert_to_full_size_image(src)
+                    images.append(full_size_src)
+        
+        # 3. Tìm ảnh từ các script JSON data (nếu có)
+        # Long Châu thường embed dữ liệu ảnh trong script tags
+        script_tags = soup.find_all('script', type='application/json')
+        for script in script_tags:
+            try:
+                import json
+                import re
+                script_content = script.get_text()
+                # Tìm URLs ảnh trong JSON
+                image_urls = re.findall(r'https://cdn\.nhathuoclongchau\.com\.vn/[^"]*\.(?:jpg|jpeg|png|webp)', script_content)
+                for url in image_urls:
+                    if self.is_product_image(url):
+                        full_size_url = self.convert_to_full_size_image(url)
+                        images.append(full_size_url)
+            except:
+                continue
+        
+        # 4. Fallback: Tìm ảnh sản phẩm khác
+        if not images:
+            product_imgs = soup.find_all('img')
+            for img in product_imgs:
                 src = img.get('src') or img.get('data-src')
-                if src and ('product' in src.lower() or 'thuoc' in src.lower() or 'cms-prod' in src):
-                    if src.startswith('/'):
-                        src = BASE_URL + src
-                    images.append(src)
-        return list(set(images))
+                if src and self.is_product_image(src):
+                    full_size_src = self.convert_to_full_size_image(src)
+                    images.append(full_size_src)
+        
+        # Loại bỏ duplicate và return
+        return list(dict.fromkeys(images))  # Giữ thứ tự và loại bỏ duplicate
+    
+    def is_product_image(self, src: str) -> bool:
+        """Kiểm tra xem URL có phải là ảnh sản phẩm không"""
+        if not src:
+            return False
+        
+        src_lower = src.lower()
+        
+        # Loại trừ các ảnh không phải sản phẩm trước
+        exclude_patterns = [
+            'logo', 'banner', 'icon', 'badge', 'smalls/',
+            'facebook', 'zalo', 'download', 'payment',
+            'visa', 'master', 'momo', 'napas', 'vnpay',
+            'apple_pay', 'amex', 'jcb', 'bo_cong_thuong',
+            'legit_', 'dmca_', 'search_', 'menu_',
+            'truyen_thong', 'tin_khuyen_mai', 'chuyen_trang',
+            'deep_link', 'goc_suc_khoe', 'short_video',
+            'cup_', 'benh_', 'thuong_hieu', 'danh_muc',
+            'kiem_tra_suc_khoe', 'header_', 'footer_'
+        ]
+        
+        for exclude in exclude_patterns:
+            if exclude in src_lower:
+                return False
+        
+        # Kiểm tra các pattern của ảnh sản phẩm Long Châu
+        # 1. URL từ CDN chính của Long Châu
+        if 'cms-prod.s3-sgn09.fptcloud.com' in src_lower:
+            # 2. Pattern ảnh sản phẩm (DSC_ là pattern chụp sản phẩm)
+            if 'dsc_' in src_lower:
+                return True
+            
+            # 3. Tên sản phẩm cụ thể trong URL
+            product_name_patterns = [
+                'lineabon', 'omexxel', 'calci', 'vitamin', 'nutrimed',
+                'nutrigrow', 'osteocare', 'vitabiotics', 'anica',
+                'pharma', 'ergopharm', 'nordic', 'excelife'
+            ]
+            
+            for pattern in product_name_patterns:
+                if pattern in src_lower:
+                    return True
+            
+            # 4. Kiểm tra số sản phẩm (pattern 00XXXXXX)
+            import re
+            if re.search(r'00\d{6}', src):
+                return True
+        
+        return False
+    
+    def convert_to_full_size_image(self, thumbnail_url: str) -> str:
+        """Chuyển đổi URL thumbnail thành URL full size"""
+        if not thumbnail_url:
+            return thumbnail_url
+        
+        # Thay thế kích thước thumbnail bằng kích thước lớn hơn
+        # Pattern: /unsafe/150x0/ -> /unsafe/768x0/ hoặc /unsafe/1024x0/
+        if '/unsafe/150x0/' in thumbnail_url:
+            return thumbnail_url.replace('/unsafe/150x0/', '/unsafe/768x0/')
+        elif '/unsafe/375x0/' in thumbnail_url:
+            return thumbnail_url.replace('/unsafe/375x0/', '/unsafe/768x0/')
+        elif '/unsafe/https://' in thumbnail_url:
+            # Fix malformed URLs: /unsafe/https://... -> /unsafe/768x0/filters:quality(90)/https://...
+            return thumbnail_url.replace('/unsafe/https://', '/unsafe/768x0/filters:quality(90)/https://')
+        
+        return thumbnail_url
     
     def extract_unit(self, soup: BeautifulSoup) -> str:
         """Trích xuất đơn vị tính"""
@@ -261,18 +574,48 @@ class LongChauCrawler:
     
     def extract_rating(self, soup: BeautifulSoup) -> float:
         """Trích xuất đánh giá sao"""
-        # Tìm rating trong cấu trúc Long Châu
-        rating_container = soup.find('div', class_='flex items-center')
-        if rating_container:
-            rating_text = rating_container.get_text()
-            # Tìm số đầu tiên trong text (rating)
-            import re
-            match = re.search(r'(\d+(?:\.\d+)?)', rating_text)
-            if match:
-                try:
-                    return float(match.group(1))
-                except:
-                    pass
+        import re
+        
+        # Tìm tất cả container có chứa từ 'đánh giá'
+        rating_containers = soup.find_all(text=lambda x: x and 'đánh giá' in x)
+        
+        for text_node in rating_containers:
+            parent = text_node.parent
+            if parent:
+                full_text = parent.get_text().strip()
+                
+                # Thử các pattern khác nhau để tìm rating
+                patterns = [
+                    r'(\d+(?:\.\d+)?)\s*\(',  # X.X (trước dấu ngoặc) - pattern tốt nhất
+                    r'(\d+(?:\.\d+)?)\s*sao',  # X.X sao
+                    r'(\d+(?:\.\d+)?)\s*/',  # X.X/5
+                ]
+                
+                for pattern in patterns:
+                    match = re.search(pattern, full_text)
+                    if match:
+                        try:
+                            rating_val = float(match.group(1))
+                            # Kiểm tra xem có phải rating hợp lệ không (0-5)
+                            if 0 <= rating_val <= 5:
+                                return rating_val
+                        except:
+                            continue
+        
+        # Fallback: tìm trong các container flex items-center
+        rating_containers = soup.find_all('div', class_='flex items-center')
+        for container in rating_containers:
+            rating_text = container.get_text()
+            if 'đánh giá' in rating_text or 'sao' in rating_text:
+                # Sử dụng pattern trước dấu ngoặc
+                match = re.search(r'(\d+(?:\.\d+)?)\s*\(', rating_text)
+                if match:
+                    try:
+                        rating_val = float(match.group(1))
+                        if 0 <= rating_val <= 5:
+                            return rating_val
+                    except:
+                        continue
         
         # Fallback selectors
         selectors = ['.rating', '.stars', '.danh-gia']
