@@ -426,69 +426,185 @@ class LongChauCrawler:
         """Trích xuất danh sách ảnh sản phẩm từ gallery carousel"""
         images = []
         
-        # 1. Trích xuất từ carousel gallery chính
-        carousel_gallery = soup.find('div', class_='carousel-gallery-list')
-        if carousel_gallery:
-            # Lấy tất cả ảnh trong carousel
-            gallery_imgs = carousel_gallery.find_all('img', class_='gallery-img')
-            for img in gallery_imgs:
-                src = img.get('src')
-                srcset = img.get('srcset')
+        # 1. Trích xuất từ Swiper carousel (cấu trúc mới)
+        swiper_wrapper = soup.find('div', class_='swiper-wrapper')
+        if swiper_wrapper:
+            # Lấy tất cả ảnh trong swiper slides
+            swiper_slides = swiper_wrapper.find_all('div', class_='swiper-slide')
+            self.logger.info(f"📸 Found {len(swiper_slides)} swiper slides")
+            
+            for i, slide in enumerate(swiper_slides):
+                img = slide.find('img', class_='gallery-img')
+                if not img:
+                    # Tìm img khác trong slide
+                    img = slide.find('img')
                 
-                # Ưu tiên lấy URL chất lượng cao từ srcset
-                if srcset:
-                    # Lấy URL 2x (chất lượng cao) từ srcset
-                    srcset_parts = srcset.split(',')
-                    for part in srcset_parts:
-                        if '2x' in part:
-                            src = part.split(' ')[0].strip()
-                            break
+                if img:
+                    # Lấy src và srcset
+                    src = img.get('src', '').strip()
+                    srcset = img.get('srcset', '').strip()
+                    
+                    # Debug log
+                    self.logger.debug(f"  Slide {i+1}: src='{src[:50]}...', srcset='{srcset[:50]}...'")
+                    
+                    # Ưu tiên lấy URL chất lượng cao từ srcset
+                    final_src = src
+                    if srcset:
+                        # Lấy URL 2x (chất lượng cao) từ srcset
+                        srcset_parts = srcset.split(',')
+                        for part in srcset_parts:
+                            part = part.strip()
+                            if '2x' in part:
+                                final_src = part.split(' ')[0].strip()
+                                break
+                        else:
+                            # Nếu không có 2x, lấy URL đầu tiên
+                            if srcset_parts:
+                                final_src = srcset_parts[0].split(' ')[0].strip()
+                    
+                    # Fallback: nếu không có src, thử data-src
+                    if not final_src:
+                        final_src = img.get('data-src', '').strip()
+                    
+                    if final_src and self.is_product_image(final_src):
+                        # Chuyển đổi sang full size nếu cần
+                        full_size_src = self.convert_to_full_size_image(final_src)
+                        images.append(full_size_src)
+                        self.logger.info(f"  ✅ Swiper slide {i+1}: {final_src.split('/')[-1]}")
                     else:
-                        # Nếu không có 2x, lấy URL đầu tiên
-                        src = srcset_parts[0].split(' ')[0].strip()
-                
-                if src and self.is_product_image(src):
-                    # Chuyển đổi sang full size nếu cần
-                    full_size_src = self.convert_to_full_size_image(src)
-                    images.append(full_size_src)
+                        if final_src:
+                            self.logger.info(f"  ❌ Swiper slide {i+1}: {final_src.split('/')[-1]} (filtered)")
+                        else:
+                            self.logger.info(f"  ❌ Swiper slide {i+1}: No src found")
+                else:
+                    self.logger.info(f"  ❌ Swiper slide {i+1}: No img element found")
         
-        # 2. Trích xuất từ modal gallery (nếu có)
-        # Tìm các ảnh trong modal lightbox gallery
-        modal_thumbs = soup.find_all('div', class_='lg-thumb-item')
-        for thumb in modal_thumbs:
-            img = thumb.find('img')
-            if img:
-                src = img.get('src')
-                if src and self.is_product_image(src):
-                    # Chuyển đổi từ thumbnail sang full size
-                    full_size_src = self.convert_to_full_size_image(src)
-                    images.append(full_size_src)
-        
-        # 3. Tìm ảnh từ các script JSON data (nếu có)
-        # Long Châu thường embed dữ liệu ảnh trong script tags
-        script_tags = soup.find_all('script', type='application/json')
-        for script in script_tags:
-            try:
-                import json
-                import re
-                script_content = script.get_text()
-                # Tìm URLs ảnh trong JSON
-                image_urls = re.findall(r'https://cdn\.nhathuoclongchau\.com\.vn/[^"]*\.(?:jpg|jpeg|png|webp)', script_content)
-                for url in image_urls:
-                    if self.is_product_image(url):
-                        full_size_url = self.convert_to_full_size_image(url)
-                        images.append(full_size_url)
-            except:
-                continue
-        
-        # 4. Fallback: Tìm ảnh sản phẩm khác
+        # 2. Fallback: Trích xuất từ carousel gallery cũ (nếu có)
         if not images:
+            carousel_gallery = soup.find('div', class_='carousel-gallery-list')
+            if carousel_gallery:
+                # Lấy tất cả ảnh trong carousel
+                gallery_imgs = carousel_gallery.find_all('img', class_='gallery-img')
+                self.logger.info(f"📸 Found {len(gallery_imgs)} carousel gallery images (fallback)")
+                
+                for i, img in enumerate(gallery_imgs):
+                    src = img.get('src')
+                    srcset = img.get('srcset')
+                    
+                    # Ưu tiên lấy URL chất lượng cao từ srcset
+                    if srcset:
+                        # Lấy URL 2x (chất lượng cao) từ srcset
+                        srcset_parts = srcset.split(',')
+                        for part in srcset_parts:
+                            if '2x' in part:
+                                src = part.split(' ')[0].strip()
+                                break
+                        else:
+                            # Nếu không có 2x, lấy URL đầu tiên
+                            src = srcset_parts[0].split(' ')[0].strip()
+                    
+                    if src and self.is_product_image(src):
+                        # Chuyển đổi sang full size nếu cần
+                        full_size_src = self.convert_to_full_size_image(src)
+                        images.append(full_size_src)
+                        self.logger.info(f"  ✅ Carousel {i+1}: {src.split('/')[-1]}")
+                    else:
+                        if src:
+                            self.logger.info(f"  ❌ Carousel {i+1}: {src.split('/')[-1]} (filtered)")
+        
+        # 3. Trích xuất từ modal gallery (nếu có)
+        modal_thumbs = soup.find_all('div', class_='lg-thumb-item')
+        if modal_thumbs:
+            self.logger.info(f"🖼️  Found {len(modal_thumbs)} modal thumbs")
+            for i, thumb in enumerate(modal_thumbs):
+                img = thumb.find('img')
+                if img:
+                    src = img.get('src')
+                    if src and self.is_product_image(src):
+                        # Chuyển đổi từ thumbnail sang full size
+                        full_size_src = self.convert_to_full_size_image(src)
+                        images.append(full_size_src)
+                        self.logger.info(f"  ✅ Modal {i+1}: {src.split('/')[-1]}")
+        
+        # 4. Tìm ảnh từ các script JSON data (nếu có ít ảnh từ carousel)
+        if len(images) < 3:
+            self.logger.info("🔍 Few carousel images found. Searching JSON scripts...")
+            script_tags = soup.find_all('script', type='application/json')
+            for script in script_tags:
+                try:
+                    import re
+                    script_content = script.get_text()
+                    # Tìm URLs ảnh sản phẩm trong JSON (chỉ DSC_ và mã sản phẩm)
+                    image_urls = re.findall(r'https://cdn\.nhathuoclongchau\.com\.vn/[^"]*(?:DSC_|00\d{6})[^"]*\.(?:jpg|jpeg|png|webp)', script_content, re.IGNORECASE)
+                    
+                    for url in image_urls:
+                        if url not in images and self.is_product_image(url):
+                            full_size_url = self.convert_to_full_size_image(url)
+                            images.append(full_size_url)
+                            self.logger.info(f"  ✅ JSON: {url.split('/')[-1]}")
+                            
+                            # Giới hạn số ảnh từ JSON để tránh quá nhiều
+                            if len(images) >= 10:
+                                break
+                except:
+                    continue
+        
+        # 5. XPath selector fallback (sử dụng lxml nếu cần)
+        if not images:
+            self.logger.info("🔍 Using XPath fallback...")
+            try:
+                from lxml import html
+                tree = html.fromstring(str(soup))
+                
+                # XPath từ bạn cung cấp (có thể cần điều chỉnh)
+                xpath_selectors = [
+                    '//div[@class="swiper-wrapper"]//img[@class="gallery-img"]',
+                    '//div[contains(@class,"swiper-slide")]//img',
+                    '//img[contains(@class,"gallery-img")]'
+                ]
+                
+                for xpath in xpath_selectors:
+                    try:
+                        img_elements = tree.xpath(xpath)
+                        if img_elements:
+                            self.logger.info(f"  Found {len(img_elements)} images with XPath: {xpath}")
+                            for img_elem in img_elements:
+                                src = img_elem.get('src')
+                                srcset = img_elem.get('srcset')
+                                
+                                # Ưu tiên srcset 2x
+                                if srcset:
+                                    srcset_parts = srcset.split(',')
+                                    for part in srcset_parts:
+                                        if '2x' in part:
+                                            src = part.split(' ')[0].strip()
+                                            break
+                                
+                                if src and self.is_product_image(src):
+                                    full_size_src = self.convert_to_full_size_image(src)
+                                    images.append(full_size_src)
+                            
+                            if images:
+                                break  # Nếu tìm thấy ảnh, dừng lại
+                    except:
+                        continue
+            except ImportError:
+                self.logger.warning("lxml not available for XPath, skipping XPath fallback")
+            except:
+                self.logger.warning("XPath fallback failed")
+        
+        # 6. Final fallback: Tìm tất cả ảnh sản phẩm
+        if not images:
+            self.logger.info("🆘 Using final fallback - searching all images")
             product_imgs = soup.find_all('img')
             for img in product_imgs:
                 src = img.get('src') or img.get('data-src')
                 if src and self.is_product_image(src):
                     full_size_src = self.convert_to_full_size_image(src)
                     images.append(full_size_src)
+        
+        # Log kết quả
+        self.logger.info(f"📊 Image extraction completed: {len(images)} images found")
         
         # Loại bỏ duplicate và return
         return list(dict.fromkeys(images))  # Giữ thứ tự và loại bỏ duplicate
