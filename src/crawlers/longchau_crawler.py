@@ -195,11 +195,11 @@ class LongChauCrawler:
                 not any(exclude in url for exclude in ['?', '#', 'page=', 'sort=']))
     
     def crawl_product_detail(self, product_url: str) -> Dict[str, Any]:
-        """Crawl thông tin chi tiết một sản phẩm"""
+        """Crawl thông tin chi tiết một sản phẩm"""                                                                                                                                                                                                         
         try:
             response = make_request(product_url, self.session.headers)
             soup = BeautifulSoup(response.content, 'html.parser')
-            
+
             # Trích xuất thông tin sản phẩm theo cấu trúc Long Châu
             product_data = {
                 'url': product_url,
@@ -221,6 +221,7 @@ class LongChauCrawler:
                 'country_of_manufacture': self.extract_country_of_manufacture(soup),
                 'ingredients': self.extract_ingredients(soup),
                 'images': self.extract_images(soup),
+                'content': self.extract_content(soup),
                 'original_price': self.extract_original_price(soup),
                 'discount': self.extract_discount(soup),
                 'description': self.extract_description(soup),
@@ -608,6 +609,98 @@ class LongChauCrawler:
         
         # Loại bỏ duplicate và return
         return list(dict.fromkeys(images))  # Giữ thứ tự và loại bỏ duplicate
+    
+    def extract_content(self, soup: BeautifulSoup) -> str:
+        """Trích xuất toàn bộ nội dung chi tiết sản phẩm"""
+        try:
+            # Tìm container chính chứa nội dung sản phẩm
+            content_container = soup.find('div', class_='lc-wrap-content lc-view-full-cont abc')
+            
+            if content_container:
+                # Lấy toàn bộ HTML content
+                content_html = str(content_container)
+                
+                # Làm sạch và format HTML
+                content_html = self._clean_content_html(content_html)
+                
+                self.logger.info(f"✅ Content extracted: {len(content_html)} characters")
+                return content_html
+            else:
+                # Fallback: tìm các selector khác
+                fallback_selectors = [
+                    'div.lc-wrap-content',
+                    'div.inner',
+                    'div.description',
+                    'div[id^="detail-content"]'
+                ]
+                
+                for selector in fallback_selectors:
+                    elements = soup.select(selector)
+                    if elements:
+                        # Lấy element đầu tiên hoặc kết hợp tất cả
+                        if len(elements) == 1:
+                            content_html = str(elements[0])
+                        else:
+                            # Kết hợp nhiều elements
+                            content_html = ''.join(str(elem) for elem in elements)
+                        
+                        content_html = self._clean_content_html(content_html)
+                        self.logger.info(f"✅ Content extracted (fallback): {len(content_html)} characters")
+                        return content_html
+                
+                self.logger.warning("❌ No content container found")
+                return ""
+                
+        except Exception as e:
+            self.logger.error(f"Lỗi khi trích xuất content: {str(e)}")
+            return ""
+    
+    def _clean_content_html(self, html_content: str) -> str:
+        """Làm sạch và format HTML content"""
+        try:
+            # Parse lại HTML để làm sạch
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Loại bỏ các elements không cần thiết
+            unwanted_selectors = [
+                'script',
+                'style', 
+                '.lc-wrap-link',
+                '.lc-overlay-detail',
+                '[class*="cursor-pointer"]'
+            ]
+            
+            for selector in unwanted_selectors:
+                for element in soup.select(selector):
+                    element.decompose()
+            
+            # Làm sạch attributes không cần thiết nhưng giữ lại cấu trúc
+            for tag in soup.find_all(True):
+                # Giữ lại một số attributes quan trọng
+                keep_attrs = ['class', 'id', 'href', 'src', 'alt', 'width', 'height']
+                attrs_to_remove = []
+                
+                for attr in tag.attrs:
+                    if attr not in keep_attrs:
+                        attrs_to_remove.append(attr)
+                
+                for attr in attrs_to_remove:
+                    del tag[attr]
+            
+            # Trả về HTML đã được làm sạch
+            cleaned_html = str(soup)
+            
+            # Loại bỏ whitespace thừa
+            import re
+            cleaned_html = re.sub(r'\s+', ' ', cleaned_html)
+            cleaned_html = re.sub(r'>\s+<', '><', cleaned_html)
+            
+            return cleaned_html.strip()
+            
+        except Exception as e:
+            self.logger.error(f"Lỗi khi làm sạch HTML content: {str(e)}")
+            return html_content  # Trả về content gốc nếu có lỗi
     
     def is_product_image(self, src: str) -> bool:
         """Kiểm tra xem URL có phải là ảnh sản phẩm không"""
